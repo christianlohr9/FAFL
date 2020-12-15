@@ -1,0 +1,470 @@
+---
+title: "Snapcounts_FAFL"
+author: "Christian Lohr"
+date: "11 November 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ffespn)
+library(nflfastR)
+
+years <- 2019
+weeks <- 1:16
+
+```
+
+## Introduction
+
+Our goal is to create a data frame which contains the snapcounts and true positions for every player in a specific year. Therefore we need a few steps:
+
+1. Get all Games in specific seasons and weeks (important to get home and away team)
+  1.1 Data: "pff_games.rds"
+2. Get all Players in a specific season (important to join with nflfastR and ESPN)
+  2.1 Data: "pff_player.rds"
+3. Get all Games for a specific Player to join them into snapcounts. Hint: This URL does also provide snap_counts. These snapcounts are for some reason not readable. Maybe theres somehow a chance to get it directly from here!
+  3.1 Data: "pff_player-games.rds"
+4. Get franchise data to create master data for joining purposes. With that table we are able to disselect many informations in other tables and join them when needed.
+5. Get all Snapcounts via game summaries
+  5.1 Data: "pff_snapcount.rds"
+6. Join all the important data
+7. Get roster data from nflfastR
+8. Join PFF and nflfastR data to get true positions
+9. Celebrate
+
+## 1. Get all Games
+
+We will get all Games for a specific season with the following API link:
+"https://premium.pff.com/api/v1/games?season=2020&week=8&league=nfl"
+
+```{r step 1, getting all games in a season}
+
+save_games <- function(year, week) {
+  raw_json <- jsonlite::fromJSON(
+    paste0(
+      "https://premium.pff.com/api/v1/games?season=",
+      year,
+      "&week=",
+      week,
+      "&league=nfl"
+    )
+  )
+  
+  if(!is.null(raw_json$games)) {
+  games <- as_tibble(raw_json$games)
+} else {
+  games <- tibble::tibble()
+}
+  
+  saveRDS(bind_rows(readRDS(paste0("pff_games",years,".rds")), games), paste0("pff_games",years,".rds"))
+message(paste("saved",year,"-",week))
+}
+
+# initiate rds file. Run only once so it's on disc
+# saveRDS(tibble::tibble(), "pff_games2019.rds")
+purrr::pwalk(purrr::transpose(
+  purrr::cross2(years, weeks)), save_games)
+
+# # check the file
+# temp <- readRDS("pff_games.rds")
+  
+```
+
+We got a data frame of all games which can be reduced to some ids. For now I'll keep everything in it to not miss out any data at some point.
+
+If we at some point need team infos, keep in mind this is possible via "https://premium.pff.com/api/v1/teams?league=nfl&season=2020"
+
+## 2. Get all Players
+
+We will get all Players for a specific season with the following API link:
+"https://premium.pff.com/api/v1/players?league=nfl&id={your player id}"
+
+Unfortunately we're not able to scrape the master data file for players. Instead I will run a script with every snap from every week of a season to get all active players we need. I have to run 3 calls:
+
+1. Get all offensive snaps
+2. Get all defensive snaps
+3. Get all special teams snaps
+4. Bind together the player id
+
+To make it generous through weeks I will save the player ids. In the future I will check only for new player ids, which had no observation in the saved file and bind these players in the saved file.
+
+```{r step 2, getting all player ids in a specific season}
+# only use the following to lines if you do the code for the first time!
+# initiate rds file. Run only once so it's on disc
+# saveRDS(tibble::tibble(), paste0("pff_player",years,".rds"))
+
+## 1. Get all offensive players via snapcount
+
+get_off <- function(year) {
+  raw_json <- jsonlite::fromJSON(
+    paste0(
+      "https://premium.pff.com/api/v1/facet/offense/summary?league=nfl&season=",
+      year
+    )
+  )
+  
+  off_ids <- raw_json$offense_stats %>% 
+    mutate(season = year)
+  
+  return(off_ids)
+  
+}
+
+all_off <- purrr::map_dfr(years, get_off)
+
+## 2. Get all defensive players via snapcount
+
+get_def <- function(year) {
+  raw_json <- jsonlite::fromJSON(
+    paste0(
+      "https://premium.pff.com/api/v1/facet/defense/summary?league=nfl&season=",
+      year
+    )
+  )
+  
+  def_ids <- raw_json$defense_stats %>% 
+    mutate(season = year)
+  
+  return(def_ids)
+  
+}
+
+all_def <- purrr::map_dfr(years, get_def)
+
+## 3. Get all special teams players via snapcount
+
+get_st <- function(year) {
+  raw_json <- jsonlite::fromJSON(
+    paste0(
+      "https://premium.pff.com/api/v1/facet/special/summary?league=nfl&season=",
+      year
+    )
+  )
+  
+  st_ids <- raw_json$special_teams_stats %>% 
+    mutate(season = year)
+  
+  return(st_ids)
+  
+}
+
+all_st <- purrr::map_dfr(years, get_st)
+
+## 4. Bind all players together
+
+all_player_id <- tibble('player_id'=unique(c(all_def$player_id,all_off$player_id,all_st$player_id))) %>% 
+  as_vector()
+
+# check_players only checks in to new players. That helps the performance, because the function doesn't have to run through 2,000 ids again.
+
+check_players <- if (is_empty(readRDS(paste0("pff_player",years,".rds")))){
+  as_tibble(all_player_id) %>%
+    as_vector
+} else {
+  readRDS(paste0("pff_player",years,".rds")) %>% 
+  full_join(as_tibble(all_player_id), by = c("id"="value")) %>% 
+  filter(is.na(last_name)) %>% # if the player isn't in the data I assume the last name is NA
+  select(id) %>% 
+  as_vector
+} 
+
+save_players <- function(player) {
+  raw_json <- jsonlite::fromJSON(paste0(
+  "https://premium.pff.com/api/v1/players?league=nfl&id=",
+  player
+  ))
+  
+  if (!is.null(raw_json$players)) {
+  players <- as_tibble(raw_json$players)
+  players$dob <- as.Date(players$dob) # I put this in afterwards, if it causes trouble get back to this line!
+  } else {
+  players <- tibble::tibble()
+  }
+  
+  saveRDS(bind_rows(readRDS(paste0("pff_player",years,".rds")), players), paste0("pff_player",years,".rds"))
+  message(paste("saved", player))
+}
+
+purrr::map_dfr(check_players, save_players)
+
+```
+
+## 3. Get all Games for a specific Player
+
+We will get all games for a player for a specific season with the following API link:
+"https://premium.pff.com/api/v1/player/offense/summary?league=nfl&season={your_season}&player_id={your player id}"
+
+First I scraped every single game for every player. This URL is the key to match players to specific games, because we will get player, game, season, week and other master data.
+
+To join the players to game data afterwards it is easier to get the games per player. In this case we'll get game ids. When scraping per game we don't get game ids.
+
+```{r step 3, getting all games for a specific player}
+
+### Warning!
+# I will slice the players into positions, because we have to scrape the url three times. 1 time for offense, 1 time for defense, 1 time for special.
+# To avoid duplicates imo this is the easiest and best way, even tho we will ignore any defensive snaps taken by an offensive player vice versa.
+position <- readRDS(paste0("pff_player",years,".rds")) %>%
+  select(id, position,last_name,first_name) %>%
+  mutate(ball_side = case_when(
+  position %in% c('C', 'FB', 'G', 'HB', 'QB', 'T', 'TE', 'WR') ~ 'offense',
+  position %in% c('CB', 'DI', 'ED', 'LB', 'S') ~ 'defense',
+  TRUE ~ 'special'))
+
+player_off <- position %>%
+  filter(ball_side=="offense") %>% 
+  select(id) %>% 
+  as_vector()
+
+player_def <- position %>%
+  filter(ball_side=="defense") %>% 
+  select(id) %>% 
+  as_vector()
+
+player_st <- position %>%
+  filter(ball_side=="special") %>% 
+  select(id) %>% 
+  as_vector()
+
+# now we'll run the loop for all 3 URLs. Maybe we can shorten it by a base R loop, but I'm used to these function calls. The main problem is, that these loops takes ages (10 minutes with 900 players) and it has to be done every single gameday...
+
+## For the first time we need to create an empty file
+# initiate rds file. Run only once so it's on disc
+saveRDS(tibble::tibble(), paste0("pff_player-games",years,".rds"))
+
+
+# save offensive snaps
+save_games_off <- function(year, player){
+raw_json <- jsonlite::fromJSON(
+  paste0(
+"https://premium.pff.com/api/v1/player/offense/summary?league=nfl&season=",
+year,
+"&player_id=",
+player)
+)
+
+if(!is.null(raw_json$offense_summary$weeks)) {
+  snapcount <- as_tibble(raw_json$offense_summary$weeks) %>% 
+    mutate(season = year,
+           ball_side = "offense")
+} else {
+  snapcount <- tibble::tibble()
+}
+
+saveRDS(bind_rows(readRDS(paste0("pff_player-games",years,".rds")), snapcount), paste0("pff_player-games",years,".rds"))
+message(paste("saved",player,"-",year))
+}
+
+purrr::pwalk(purrr::transpose(
+  purrr::cross2(years, player_off)), save_games_off)
+
+# save defensive snaps
+save_games_def <- function(year, player){
+raw_json <- jsonlite::fromJSON(
+  paste0(
+"https://premium.pff.com/api/v1/player/defense/summary?league=nfl&season=",
+year,
+"&player_id=",
+player)
+)
+
+if(!is.null(raw_json$defense_summary$weeks)) {
+  snapcount <- as_tibble(raw_json$defense_summary$weeks) %>% 
+    mutate(season = year,
+           ball_side = "defense")
+} else {
+  snapcount <- tibble::tibble()
+}
+
+saveRDS(bind_rows(readRDS(paste0("pff_player-games",years,".rds")), snapcount), paste0("pff_player-games",years,".rds"))
+message(paste("saved",player,"-",year))
+}
+
+purrr::pwalk(purrr::transpose(
+  purrr::cross2(years, player_def)), save_games_def)
+
+# save special teams snaps
+save_games_st <- function(year, player){
+raw_json <- jsonlite::fromJSON(
+  paste0(
+"https://premium.pff.com/api/v1/player/special/summary?league=nfl&season=",
+year,
+"&player_id=",
+player)
+)
+
+if(!is.null(raw_json$special_teams_summary$weeks)) {
+  snapcount <- as_tibble(raw_json$special_teams_summary$weeks) %>% 
+    mutate(season = year,
+           ball_side = "special")
+} else {
+  snapcount <- tibble::tibble()
+}
+
+saveRDS(bind_rows(readRDS(paste0("pff_player-games",years,".rds")), snapcount), paste0("pff_player-games",years,".rds"))
+message(paste("saved",player,"-",year))
+}
+
+purrr::pwalk(purrr::transpose(
+  purrr::cross2(years, player_st)), save_games_st)
+
+
+#some lines are different in each query. Off has 14, def 21 and st 15 columns. We reduce all to the 14 columns on offense.
+readRDS(paste0("pff_player-games",years,".rds")) %>%
+  select(-c("assists","forced_fumbles","hits","interceptions","pass_break_ups","sacks","tackles","pu_def_rush")) %>% 
+  saveRDS(paste0("pff_player-games",years,".rds"))
+
+```
+
+## 4. Get all Franchises as master data table
+
+In the data frame from 3 are all informations about franchises, so why not create a franchise master data table?
+
+```{r step 4, getting all franchise informations}
+
+# initiate rds file. Run only once so it's on disc
+# saveRDS(tibble::tibble(), paste0("pff_franchises",years,".rds"))
+
+get_franchises <- function(year) {
+  raw_json <- jsonlite::fromJSON(
+    paste0(
+      "https://premium.pff.com/api/v1/teams/overview?league=nfl&season=",
+      year
+    )
+  )
+  franchise_ids <- raw_json$team_overview %>% 
+    mutate(season = year)
+
+  saveRDS(bind_rows(readRDS(paste0("pff_franchises",years,".rds")), franchise_ids), paste0("pff_franchises",years,".rds"))
+  message(paste("saved",year))
+}
+purrr::pwalk(purrr::transpose(
+  purrr::cross(years)), get_franchises)
+
+
+```
+
+## 5. Get all Snapcounts via game summaries
+
+Unfortunately we're not able to get the snapcounts directly from step 3. Therefore, we need to run a script for every single week and every single season.
+
+```{r step 5, getting all snaps for a specific game}
+
+# initiate rds file. Run only once so it's on disc
+# saveRDS(tibble::tibble(), paste0("snapcount",years,".rds"))
+
+# for ongoing season I read in the saved file and get the max week to bind only new snaps from the following week
+# temp <- readRDS("snapcount2020_new.rds")
+# max_wk <- max(temp$wk)
+# snaps_week <- max_wk+1
+
+
+save_snaps <- function(year, player, week){
+raw_json <- jsonlite::fromJSON(
+  paste0(
+"https://premium.pff.com/api/v1/player/snaps/summary?league=nfl&league=nfl&season=",
+year,
+"&player_id=",
+player,
+"&week=",
+week)
+)
+if(!is.null(raw_json$snaps$snap_counts)) {
+  snapcount <- as_tibble(raw_json$snaps$snap_counts) %>% 
+    mutate(player = player,
+           season = year,
+           wk = week)
+} else {
+  snapcount <- tibble::tibble()
+}
+
+saveRDS(bind_rows(readRDS(paste0("snapcount",years,".rds")), snapcount), paste0("snapcount",years,".rds"))
+message(paste("saved",player,"-",year,"-",week))
+}
+
+purrr::pwalk(purrr::transpose(
+  purrr::cross3(years, all_player_id, weeks)), save_snaps)
+
+
+```
+
+## 6. Join player snapcounts to game data
+
+I will join the game data from step 1 with the snapcount data from step 3 to get the opponent and other important stuff.
+
+```{r step 6, joining games to players}
+temp <- readRDS(paste0("pff_player",years,".rds")) %>%
+  select(id,first_name, last_name, position, dob) %>%
+  left_join((readRDS(paste0("pff_player-games",years,".rds")) %>% 
+               filter(week>0, week<17)),
+  by = c(
+  "id" = "player_id"
+  ),
+  suffix = c("_player","_game")) %>%
+  select(-c("game", "away_team_name", "home_team_name", "status")) %>% 
+  left_join(
+  readRDS(paste0("snapcount",years,".rds")),
+  by = c(
+  'id' = 'player',
+  "season" = "season",
+  "week" = "wk"
+  ),
+  suffix = c('_game', '_snap')
+  )
+
+saveRDS(temp,paste0("pff_main_data",years,".rds"))
+
+### debugging
+
+temp <- readRDS(paste0("pff_player",years,".rds")) #%>% 
+  filter(is.na(last_name))
+
+temp3 <- temp2 %>% 
+  filter(game_id==13792)# %>% 
+  group_by(game_id,player_id) %>% 
+  summarise(n=n()) %>% 
+  right_join(temp, by = c("player_id"="id",
+                          "game_id" = "game_id")) %>% 
+  filter(game_id==13792)
+
+temp4 <- temp %>% 
+  filter(game_id==13867)
+
+temp5 <- pbp_db %>% 
+  filter(season==2019, week==7, posteam=="LV") %>% 
+  group_by(receiver) %>% 
+  summarise(n=n()) %>% 
+  collect()
+
+temp5 <- position %>% 
+  filter(game_id==13792)
+# I needed a break ;)
+
+# main_pff_df <- readRDS("pff_player-games.rds") %>%
+#   select(-c("game", "away_team_name", "home_team_name", "status")) %>%
+#   left_join(
+#   readRDS("snapcount2020_new.rds"),
+#   by = c(
+#   'player_id' = 'player',
+#   "season" = "season",
+#   "week" = "wk"
+#   ),
+#   suffix = c('_game', '_snap')
+#   ) #%>% 
+#   select(player_id, season, dob, first_name, last_name, jersey_number_game, position_career, player_franchise_id) %>% 
+#   distinct %>% 
+#   mutate(
+#     name_begin = substr(first_name,1,1),
+#     nflfastR_tm_code = franchise_vec[player_franchise_id],
+#     nflfastR_tm_code = case_when(
+#       nflfastR_tm_code == 'LAR' & season <= 2015 ~ 'STL',
+#       nflfastR_tm_code == 'LAC' & season <= 2016 ~ 'SD',
+#       nflfastR_tm_code == 'OAK' & season >= 2019 ~ 'LV',
+#       TRUE ~ nflfastR_tm_code
+#     )
+#   )
+ 
+```
+
