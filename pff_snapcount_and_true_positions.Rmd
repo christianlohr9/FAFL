@@ -8,11 +8,14 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
+Sys.setenv(http_proxy = "172.30.15.242:8080")
+Sys.setenv(https_proxy = "172.30.7.242:8080")
+
 library(tidyverse)
-library(ffespn)
+# library(ffespn)
 library(nflfastR)
 
-years <- 2019
+years <- 2020
 weeks <- 1:16
 
 ```
@@ -31,8 +34,8 @@ Our goal is to create a data frame which contains the snapcounts and true positi
 5. Get all Snapcounts via game summaries
   5.1 Data: "pff_snapcount.rds"
 6. Join all the important data
-7. Get roster data from nflfastR
-8. Join PFF and nflfastR data to get true positions
+7. Get roster data from nflfastR and join it with pff data to get true positions
+8. Join franchises to franchise id if needed (optional)
 9. Celebrate
 
 ## 1. Get all Games
@@ -41,6 +44,9 @@ We will get all Games for a specific season with the following API link:
 "https://premium.pff.com/api/v1/games?season=2020&week=8&league=nfl"
 
 ```{r step 1, getting all games in a season}
+
+# initiate rds file. Run only once so it's on disc
+saveRDS(tibble::tibble(), paste0("pff_games",years,".rds"))
 
 save_games <- function(year, week) {
   raw_json <- jsonlite::fromJSON(
@@ -63,8 +69,6 @@ save_games <- function(year, week) {
 message(paste("saved",year,"-",week))
 }
 
-# initiate rds file. Run only once so it's on disc
-# saveRDS(tibble::tibble(), "pff_games2019.rds")
 purrr::pwalk(purrr::transpose(
   purrr::cross2(years, weeks)), save_games)
 
@@ -94,7 +98,7 @@ To make it generous through weeks I will save the player ids. In the future I wi
 ```{r step 2, getting all player ids in a specific season}
 # only use the following to lines if you do the code for the first time!
 # initiate rds file. Run only once so it's on disc
-# saveRDS(tibble::tibble(), paste0("pff_player",years,".rds"))
+saveRDS(tibble::tibble(), paste0("pff_player",years,".rds"))
 
 ## 1. Get all offensive players via snapcount
 
@@ -325,7 +329,7 @@ In the data frame from 3 are all informations about franchises, so why not creat
 ```{r step 4, getting all franchise informations}
 
 # initiate rds file. Run only once so it's on disc
-# saveRDS(tibble::tibble(), paste0("pff_franchises",years,".rds"))
+saveRDS(tibble::tibble(), paste0("pff_franchises",years,".rds"))
 
 get_franchises <- function(year) {
   raw_json <- jsonlite::fromJSON(
@@ -353,12 +357,16 @@ Unfortunately we're not able to get the snapcounts directly from step 3. Therefo
 ```{r step 5, getting all snaps for a specific game}
 
 # initiate rds file. Run only once so it's on disc
-# saveRDS(tibble::tibble(), paste0("snapcount",years,".rds"))
+saveRDS(tibble::tibble(), paste0("snapcount",years,".rds"))
 
 # for ongoing season I read in the saved file and get the max week to bind only new snaps from the following week
-# temp <- readRDS("snapcount2020_new.rds")
-# max_wk <- max(temp$wk)
-# snaps_week <- max_wk+1
+temp <- readRDS(paste0("snapcount",years,".rds"))
+max_wk <- max(temp$wk)
+snaps_week <- max_wk+1 # put this in line 396 instead of "weeks" if scraping one week
+snaps_ongoing_year <- c(snaps_week:16) # put this in line 396 instead of "weeks" if scraping the whole year
+temp %>% 
+  filter(wk<max_wk) %>% 
+  saveRDS(paste0("snapcount",years,".rds"))
 
 
 save_snaps <- function(year, player, week){
@@ -387,7 +395,6 @@ message(paste("saved",player,"-",year,"-",week))
 purrr::pwalk(purrr::transpose(
   purrr::cross3(years, all_player_id, weeks)), save_snaps)
 
-
 ```
 
 ## 6. Join player snapcounts to game data
@@ -414,57 +421,57 @@ temp <- readRDS(paste0("pff_player",years,".rds")) %>%
   suffix = c('_game', '_snap')
   )
 
-saveRDS(temp,paste0("pff_main_data",years,".rds"))
+```
 
-### debugging
+## 7. Get roster data from nflfastR and join it with pff data to get true positions
 
-temp <- readRDS(paste0("pff_player",years,".rds")) #%>% 
-  filter(is.na(last_name))
+I was able to get Sebastian to fill the pff_id in the nflfastR roster data. There are some NAs in it, but with a simple check we can be sure to have all pff_id rows we need filled.
 
-temp3 <- temp2 %>% 
-  filter(game_id==13792)# %>% 
-  group_by(game_id,player_id) %>% 
-  summarise(n=n()) %>% 
-  right_join(temp, by = c("player_id"="id",
-                          "game_id" = "game_id")) %>% 
-  filter(game_id==13792)
+This is an easy way to get the much needed gsis_id into the data frame!
 
-temp4 <- temp %>% 
-  filter(game_id==13867)
+Note: Since the roster data basically is the Sleeper API player data frame, all data is from the Fantasy Football Plattforms stat provider (which is it?)
 
-temp5 <- pbp_db %>% 
-  filter(season==2019, week==7, posteam=="LV") %>% 
-  group_by(receiver) %>% 
-  summarise(n=n()) %>% 
-  collect()
+```{r step 7, Get roster data from nflfastR and join it with pff data to get true positions}
 
-temp5 <- position %>% 
-  filter(game_id==13792)
-# I needed a break ;)
+roster <- nflfastR::fast_scraper_roster(2020)
+names(roster) <- paste0("nflfastR.", names(roster))
 
-# main_pff_df <- readRDS("pff_player-games.rds") %>%
-#   select(-c("game", "away_team_name", "home_team_name", "status")) %>%
-#   left_join(
-#   readRDS("snapcount2020_new.rds"),
-#   by = c(
-#   'player_id' = 'player',
-#   "season" = "season",
-#   "week" = "wk"
-#   ),
-#   suffix = c('_game', '_snap')
-#   ) #%>% 
-#   select(player_id, season, dob, first_name, last_name, jersey_number_game, position_career, player_franchise_id) %>% 
-#   distinct %>% 
-#   mutate(
-#     name_begin = substr(first_name,1,1),
-#     nflfastR_tm_code = franchise_vec[player_franchise_id],
-#     nflfastR_tm_code = case_when(
-#       nflfastR_tm_code == 'LAR' & season <= 2015 ~ 'STL',
-#       nflfastR_tm_code == 'LAC' & season <= 2016 ~ 'SD',
-#       nflfastR_tm_code == 'OAK' & season >= 2019 ~ 'LV',
-#       TRUE ~ nflfastR_tm_code
-#     )
-#   )
- 
+temp2 <- roster %>% 
+  select(nflfastR.pff_id,nflfastR.gsis_id,nflfastR.position,nflfastR.depth_chart_position) %>% 
+  right_join(temp, by = c("nflfastR.pff_id"="id"))
+
+
+# are there missing pff_ids in the roster data? If the ata frame is empty "no", if there are missing pieces, get in touch with Sebastian.
+temp_na <- temp2 %>% filter(is.na(nflfastR.pff_id))
+
+saveRDS(temp2,paste0("pff_main_data",years,".rds"))
+
+```
+
+## 8. Join franchises to franchise id if needed (optional)
+
+```{r step 8, Join franchises to franchise id if needed (optional)}
+
+# get away franchise name
+temp3 <- readRDS(paste0("pff_franchises",years,".rds")) %>%  
+  select(franchise_id, abbreviation) %>% 
+  right_join(temp2, by = c("franchise_id"="away_franchise_id")) %>% 
+  rename("away_franchise_name"="abbreviation") %>% 
+  select(-franchise_id)
+# get home franchise name
+temp4 <- readRDS(paste0("pff_franchises",years,".rds")) %>%  
+  select(franchise_id, abbreviation) %>% 
+  right_join(temp3, by = c("franchise_id"="home_franchise_id")) %>% 
+  rename("home_franchise_name"="abbreviation") %>% 
+  select(-franchise_id)
+# get player franchise name
+temp5 <- readRDS(paste0("pff_franchises",years,".rds")) %>%  
+  select(franchise_id, abbreviation) %>% 
+  right_join(temp4, by = c("franchise_id"="player_franchise_id")) %>% 
+  rename("player_franchise_name"="abbreviation") %>% 
+  select(-franchise_id)
+
+saveRDS(temp5,paste0("pff_main_data_fafl",years,".rds"))
+
 ```
 
