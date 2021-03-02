@@ -15,7 +15,7 @@ library(tidyverse)
 # library(ffespn)
 library(nflfastR)
 
-years <- 2020
+years <- 2017
 weeks <- 1:16
 
 ```
@@ -46,7 +46,7 @@ We will get all Games for a specific season with the following API link:
 ```{r step 1, getting all games in a season}
 
 # initiate rds file. Run only once so it's on disc
-saveRDS(tibble::tibble(), paste0("pff_games",years,".rds"))
+saveRDS(tibble::tibble(), paste0("data/pff_games",years,".rds"))
 
 save_games <- function(year, week) {
   raw_json <- jsonlite::fromJSON(
@@ -65,7 +65,7 @@ save_games <- function(year, week) {
   games <- tibble::tibble()
 }
   
-  saveRDS(bind_rows(readRDS(paste0("pff_games",years,".rds")), games), paste0("pff_games",years,".rds"))
+  saveRDS(bind_rows(readRDS(paste0("data/pff_games",years,".rds")), games), paste0("data/pff_games",years,".rds"))
 message(paste("saved",year,"-",week))
 }
 
@@ -98,7 +98,7 @@ To make it generous through weeks I will save the player ids. In the future I wi
 ```{r step 2, getting all player ids in a specific season}
 # only use the following to lines if you do the code for the first time!
 # initiate rds file. Run only once so it's on disc
-saveRDS(tibble::tibble(), paste0("pff_player",years,".rds"))
+saveRDS(tibble::tibble(), paste0("data/pff_player",years,".rds"))
 
 ## 1. Get all offensive players via snapcount
 
@@ -164,11 +164,11 @@ all_player_id <- tibble('player_id'=unique(c(all_def$player_id,all_off$player_id
 
 # check_players only checks in to new players. That helps the performance, because the function doesn't have to run through 2,000 ids again.
 
-check_players <- if (is_empty(readRDS(paste0("pff_player",years,".rds")))){
+check_players <- if (is_empty(readRDS(paste0("data/pff_player",years,".rds")))){
   as_tibble(all_player_id) %>%
     as_vector
 } else {
-  readRDS(paste0("pff_player",years,".rds")) %>% 
+  readRDS(paste0("data/pff_player",years,".rds")) %>% 
   full_join(as_tibble(all_player_id), by = c("id"="value")) %>% 
   filter(is.na(last_name)) %>% # if the player isn't in the data I assume the last name is NA
   select(id) %>% 
@@ -188,7 +188,7 @@ save_players <- function(player) {
   players <- tibble::tibble()
   }
   
-  saveRDS(bind_rows(readRDS(paste0("pff_player",years,".rds")), players), paste0("pff_player",years,".rds"))
+  saveRDS(bind_rows(readRDS(paste0("data/pff_player",years,".rds")), players), paste0("data/pff_player",years,".rds"))
   message(paste("saved", player))
 }
 
@@ -210,7 +210,7 @@ To join the players to game data afterwards it is easier to get the games per pl
 ### Warning!
 # I will slice the players into positions, because we have to scrape the url three times. 1 time for offense, 1 time for defense, 1 time for special.
 # To avoid duplicates imo this is the easiest and best way, even tho we will ignore any defensive snaps taken by an offensive player vice versa.
-position <- readRDS(paste0("pff_player",years,".rds")) %>%
+position <- readRDS(paste0("data/pff_player",years,".rds")) %>%
   select(id, position,last_name,first_name) %>%
   mutate(ball_side = case_when(
   position %in% c('C', 'FB', 'G', 'HB', 'QB', 'T', 'TE', 'WR') ~ 'offense',
@@ -220,23 +220,32 @@ position <- readRDS(paste0("pff_player",years,".rds")) %>%
 player_off <- position %>%
   filter(ball_side=="offense") %>% 
   select(id) %>% 
+  arrange(id) %>% 
   as_vector()
 
 player_def <- position %>%
   filter(ball_side=="defense") %>% 
-  select(id) %>% 
+  select(id) %>%  
+  arrange(id) %>% 
   as_vector()
 
 player_st <- position %>%
   filter(ball_side=="special") %>% 
-  select(id) %>% 
+  select(id) %>%  
+  arrange(id) %>% 
+  as_vector()
+
+player_off2 <- player_off %>%
+  as_tibble() %>% 
+  filter(value>9234) %>%
+  arrange(value) %>% 
   as_vector()
 
 # now we'll run the loop for all 3 URLs. Maybe we can shorten it by a base R loop, but I'm used to these function calls. The main problem is, that these loops takes ages (10 minutes with 900 players) and it has to be done every single gameday...
 
 ## For the first time we need to create an empty file
 # initiate rds file. Run only once so it's on disc
-saveRDS(tibble::tibble(), paste0("pff_player-games",years,".rds"))
+saveRDS(tibble::tibble(), paste0("data/pff_player-games",years,".rds"))
 
 
 # save offensive snaps
@@ -257,8 +266,10 @@ if(!is.null(raw_json$offense_summary$weeks)) {
   snapcount <- tibble::tibble()
 }
 
-saveRDS(bind_rows(readRDS(paste0("pff_player-games",years,".rds")), snapcount), paste0("pff_player-games",years,".rds"))
+saveRDS(bind_rows(readRDS(paste0("data/pff_player-games",years,".rds")), snapcount), paste0("data/pff_player-games",years,".rds"))
 message(paste("saved",player,"-",year))
+
+Sys.sleep(1)
 }
 
 purrr::pwalk(purrr::transpose(
@@ -282,8 +293,10 @@ if(!is.null(raw_json$defense_summary$weeks)) {
   snapcount <- tibble::tibble()
 }
 
-saveRDS(bind_rows(readRDS(paste0("pff_player-games",years,".rds")), snapcount), paste0("pff_player-games",years,".rds"))
+saveRDS(bind_rows(readRDS(paste0("data/pff_player-games",years,".rds")), snapcount), paste0("data/pff_player-games",years,".rds"))
 message(paste("saved",player,"-",year))
+
+Sys.sleep(1)
 }
 
 purrr::pwalk(purrr::transpose(
@@ -307,7 +320,7 @@ if(!is.null(raw_json$special_teams_summary$weeks)) {
   snapcount <- tibble::tibble()
 }
 
-saveRDS(bind_rows(readRDS(paste0("pff_player-games",years,".rds")), snapcount), paste0("pff_player-games",years,".rds"))
+saveRDS(bind_rows(readRDS(paste0("data/pff_player-games",years,".rds")), snapcount), paste0("data/pff_player-games",years,".rds"))
 message(paste("saved",player,"-",year))
 }
 
@@ -316,9 +329,9 @@ purrr::pwalk(purrr::transpose(
 
 
 #some lines are different in each query. Off has 14, def 21 and st 15 columns. We reduce all to the 14 columns on offense.
-readRDS(paste0("pff_player-games",years,".rds")) %>%
+readRDS(paste0("data/pff_player-games",years,".rds")) %>%
   select(-c("assists","forced_fumbles","hits","interceptions","pass_break_ups","sacks","tackles","pu_def_rush")) %>% 
-  saveRDS(paste0("pff_player-games",years,".rds"))
+  saveRDS(paste0("data/pff_player-games",years,".rds"))
 
 ```
 
